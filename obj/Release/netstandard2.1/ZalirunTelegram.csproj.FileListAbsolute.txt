@@ -1,0 +1,5 @@
+D:\Projects\ZalirunTelegram\ZalirunTelegram\obj\Release\netstandard2.1\ZalirunTelegram.csproj.AssemblyReference.cache
+D:\Projects\ZalirunTelegram\ZalirunTelegram\obj\Release\netstandard2.1\ZalirunTelegram.GeneratedMSBuildEditorConfig.editorconfig
+D:\Projects\ZalirunTelegram\ZalirunTelegram\obj\Release\netstandard2.1\ZalirunTelegram.AssemblyInfoInputs.cache
+D:\Projects\ZalirunTelegram\ZalirunTelegram\obj\Release\netstandard2.1\ZalirunTelegram.AssemblyInfo.cs
+D:\Projects\ZalirunTelegram\ZalirunTelegram\obj\Release\netstandard2.1\ZalirunTelegram.csproj.CoreCompileInputs.cache

@@ -1,0 +1,12 @@
+D:\Projects\ZalirunTelegram\ZalirunTelegram\bin\Release\netstandard2.0\ZalirunTelegram.deps.json
+D:\Projects\ZalirunTelegram\ZalirunTelegram\bin\Release\netstandard2.0\ZalirunTelegram.dll
+D:\Projects\ZalirunTelegram\ZalirunTelegram\bin\Release\netstandard2.0\ZalirunTelegram.pdb
+D:\Projects\ZalirunTelegram\ZalirunTelegram\bin\Release\netstandard2.0\ZalirunExtentions.dll
+D:\Projects\ZalirunTelegram\ZalirunTelegram\obj\Release\netstandard2.0\ZalirunTelegram.csproj.AssemblyReference.cache
+D:\Projects\ZalirunTelegram\ZalirunTelegram\obj\Release\netstandard2.0\ZalirunTelegram.GeneratedMSBuildEditorConfig.editorconfig
+D:\Projects\ZalirunTelegram\ZalirunTelegram\obj\Release\netstandard2.0\ZalirunTelegram.AssemblyInfoInputs.cache
+D:\Projects\ZalirunTelegram\ZalirunTelegram\obj\Release\netstandard2.0\ZalirunTelegram.AssemblyInfo.cs
+D:\Projects\ZalirunTelegram\ZalirunTelegram\obj\Release\netstandard2.0\ZalirunTelegram.csproj.CoreCompileInputs.cache
+D:\Projects\ZalirunTelegram\ZalirunTelegram\obj\Release\netstandard2.0\ZalirunTelegram.csproj.CopyComplete
+D:\Projects\ZalirunTelegram\ZalirunTelegram\obj\Release\netstandard2.0\ZalirunTelegram.dll
+D:\Projects\ZalirunTelegram\ZalirunTelegram\obj\Release\netstandard2.0\ZalirunTelegram.pdb
