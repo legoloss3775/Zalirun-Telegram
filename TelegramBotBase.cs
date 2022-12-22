@@ -11,6 +11,7 @@ using Telegram.Bot.Types;
 using Telegram.Bot.Types.Enums;
 using Telegram.Bot.Types.Payments;
 using Telegram.Bot.Types.ReplyMarkups;
+using System.Reflection;
 
 namespace Zalirun.Telegram.Core
 {
@@ -161,9 +162,12 @@ namespace Zalirun.Telegram.Core
         {
             var timer = TimerManager.SetTimer(interval, autoReset, out var timerId);
             OnTimedMessageCreated(this, new MessageTimerEventArgs(timerId, args));
+            if (args is T tArgs)
+            {
+                MessageTimerIds.Add(timerId, tArgs);
+            }
 
-            Logger.Trace($"Created message with timer Id : {timerId} \n " +
-                $"Сообщение : {messageText}, chatId : {chatId}");
+            Logger.Trace($"Created message with timer Id : {timerId} for chatId : {chatId}\nMessage :\n{{\n{messageText}\n}}");
             Logger.Info($"Created message with timer Id : {timerId}, chatId : {chatId}");
 
             timer.Elapsed += async (sender, e) =>
@@ -179,48 +183,10 @@ namespace Zalirun.Telegram.Core
                 {
                     MessageTimerIds.Remove(timerId);
                 }
+
                 onTimedEvent?.Invoke(message);
             };
             return Task.FromResult(timer);
-        }
-
-        public virtual async Task<bool> DeleteMessage(string chatId, int messageId)
-        {
-            try
-            {
-                await Client.DeleteMessageAsync(chatId, messageId);
-                OnMessageDelete(this, new MessageDeleteEventArgs(chatId, messageId));
-
-                Logger.Info($"Deleted message Id: {messageId} in chat {chatId}");
-                return true;
-            }
-            catch (Exception e)
-            {
-                Logger.Error(e);
-                return false;
-            }
-        }
-
-        public virtual async Task EditTextMessageAsync(Message message, IMessageArgs args,
-                                                       ParseMode? parseMode = null,
-                                                       bool? disableWebPreview = null,
-                                                       CancellationToken cancellationToken = default)
-        {
-            try
-            {
-                var sentMessage = await Client.EditMessageTextAsync(message.Chat.Id, message.MessageId,
-                                                                    message.Text, parseMode, message.Entities, disableWebPreview,
-                                                                    message.ReplyMarkup, cancellationToken);
-                args.Message = message;
-                OnMessageEdit(this, args);
-
-                Logger.Trace($"Edited message Id: {message.MessageId} \n{message.Text}");
-                Logger.Info($"Edited message Id: {message.MessageId}");
-            }
-            catch (Exception e)
-            {
-                Logger.Error(e);
-            }
         }
 
         public virtual async Task<Message> SendMessageAsync(string chatId, string messageText, IMessageArgs args,
@@ -240,8 +206,13 @@ namespace Zalirun.Telegram.Core
                 }
                 args.Message = message;
                 OnMessageSent(this, args);
+                if (args is T tArgs)
+                {
+                    var messageId = tArgs.Message.MessageId.ToString();
+                    await AddSentMessageAsync(tArgs);
+                }
 
-                Logger.Trace($"Sent message Id: {message.MessageId} \n{message.Text}");
+                Logger.Trace($"Sent message Id: {message.MessageId}\n{{\n{message.Text}\n}}");
                 Logger.Info($"Sent message Id: {message.MessageId}");
                 return message;
             }
@@ -249,6 +220,53 @@ namespace Zalirun.Telegram.Core
             {
                 Logger.Error(e);
                 return default;
+            }
+        }
+
+        public virtual async Task EditTextMessageAsync(Message message, IMessageArgs args,
+                                                       ParseMode? parseMode = null,
+                                                       bool? disableWebPreview = null,
+                                                       CancellationToken cancellationToken = default)
+        {
+            try
+            {
+                var sentMessage = await Client.EditMessageTextAsync(message.Chat.Id, message.MessageId,
+                                                                    message.Text, parseMode, message.Entities, disableWebPreview,
+                                                                    message.ReplyMarkup, cancellationToken);
+                args.Message = message;
+                OnMessageEdit(this, args);
+                if (args is T tArgs)
+                {
+                    await EditSentMessageAsync(tArgs);
+                }
+
+                Logger.Trace($"Edited message Id: {message.MessageId}\n{{\n{message.Text}\n}}");
+                Logger.Info($"Edited message Id: {message.MessageId}");
+            }
+            catch (Exception e)
+            {
+                Logger.Error(e);
+            }
+        }
+
+        public virtual async Task<bool> DeleteMessage(string chatId, int messageId)
+        {
+            try
+            {
+                await Client.DeleteMessageAsync(chatId, messageId);
+                OnMessageDelete(this, new MessageDeleteEventArgs(chatId, messageId));
+                if (SentMessages.ContainsKey(messageId.ToString()))
+                {
+                    await RemoveSentMessageAsync(messageId);
+                }
+
+                Logger.Info($"Deleted message Id: {messageId} in chat {chatId}");
+                return true;
+            }
+            catch (Exception e)
+            {
+                Logger.Error(e);
+                return false;
             }
         }
 
@@ -264,12 +282,22 @@ namespace Zalirun.Telegram.Core
 
         protected virtual void OnTimedMessageCreated(object sender, MessageTimerEventArgs e)
         {
-            if (e.MessageArgs is T args)
-            {
-                e.MessageArgs = args;
-                MessageTimerIds.Add(e.TimerId, args);
-                TimedMessageCreated?.Invoke(sender, e);
-            }
+            TimedMessageCreated?.Invoke(sender, e);
+        }
+
+        protected virtual void OnMessageSent(object sender, IMessageArgs e)
+        {
+            MessageSent?.Invoke(sender, e);
+        }
+
+        protected virtual void OnMessageEdit(object sender, IMessageArgs e)
+        {
+            MessageEdit?.Invoke(sender, e);
+        }
+
+        protected virtual void OnMessageDelete(object sender, MessageDeleteEventArgs e)
+        {
+            MessageDelete?.Invoke(sender, e);
         }
 
         protected virtual async Task RemoveSentMessageAsync(int messageId)
@@ -346,34 +374,6 @@ namespace Zalirun.Telegram.Core
             Logger.Info($"{SentMessagesFileName} - deleted {count} values");
 
             FileManager.WriteJson(SentMessagesFileName, SentMessages);
-        }
-
-        protected virtual async void OnMessageSent(object sender, IMessageArgs e)
-        {
-            if (e is T args)
-            {
-                var messageId = args.Message.MessageId.ToString();
-                await AddSentMessageAsync(args);
-                MessageSent?.Invoke(sender, args);
-            }
-        }
-
-        protected virtual async void OnMessageEdit(object sender, IMessageArgs e)
-        {
-            if (e is T args)
-            {
-                await EditSentMessageAsync(args);
-                MessageEdit?.Invoke(sender, args);
-            }
-        }
-
-        protected virtual async void OnMessageDelete(object sender, MessageDeleteEventArgs e)
-        {
-            if (SentMessages.ContainsKey(e.MessageId.ToString()))
-            {
-                await RemoveSentMessageAsync(e.MessageId);
-                MessageDelete?.Invoke(sender, e);
-            }
         }
 
         protected abstract Task HandleUnkownUpdateAsync(Update e);
