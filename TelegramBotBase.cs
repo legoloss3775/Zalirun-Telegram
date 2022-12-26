@@ -5,26 +5,30 @@ using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using NLog;
-using Zalirun.Extentions;
-using Telegram.Bot;
-using Telegram.Bot.Types;
+using global::Telegram.Bot;
+using global::Telegram.Bot.Types;
 using Telegram.Bot.Types.Enums;
 using Telegram.Bot.Types.Payments;
 using Telegram.Bot.Types.ReplyMarkups;
-using System.Reflection;
+using Zalirun.Extentions;
 
 namespace Zalirun.Telegram.Core
 {
     public abstract class TelegramBotBase<T> : ITelegramBot where T : IMessageArgs
     {
         public static ITelegramBotClient Client { get; private set; }
+
         protected static readonly ILogger Logger = NLog.LogManager.GetCurrentClassLogger();
         protected static readonly SemaphoreSlim FileReaderSemaphore = new SemaphoreSlim(1, 1);
+        protected static System.Timers.Timer ClientRestartTimer { get; private set; }
+        protected static CancellationTokenSource ClientCancellationTokenSource { get; private set; }
 
         public abstract ITelegramBotConfigurator TelegramBotConfigurator { get; }
+        public abstract string TelegramBotName { get; }
         public virtual string SentMessagesFileName => $"{this.GetType().Name}.json";
         public virtual Dictionary<string, T> SentMessages { get; private set; } = new Dictionary<string, T>();
         public virtual Dictionary<Guid, T> MessageTimerIds { get; private set; } = new Dictionary<Guid, T>();
+
         protected virtual int DeleteOldMessagesDaysInterval => 30;
 
         public static event EventHandler<Update> UpdateRecieved;
@@ -48,7 +52,7 @@ namespace Zalirun.Telegram.Core
             {
                 Logger.Info($"Begin >> Init {GetType().Name}");
 
-                if(TelegramBotConfigurator == null)
+                if (TelegramBotConfigurator == null)
                 {
                     throw new Exception("Telegram Configurator not found");
                 }
@@ -56,8 +60,11 @@ namespace Zalirun.Telegram.Core
                 LoadSentMessagesFromDataStore();
                 if (Client == null)
                 {
-                    StartClient(TelegramBotConfigurator.GetTelegramBotToken("TelegramBot"));
+                    StartClient(TelegramBotConfigurator.GetTelegramBotToken(TelegramBotName));
+                    SetClientRestartTimer(this);
                 }
+
+                OnInit(this, EventArgs.Empty);
             }
             catch (Exception e)
             {
@@ -65,7 +72,6 @@ namespace Zalirun.Telegram.Core
             }
             finally
             {
-                OnInit(this, EventArgs.Empty);
                 Logger.Info($"End >> Init {GetType().Name}");
             }
         }
@@ -82,8 +88,8 @@ namespace Zalirun.Telegram.Core
                 }
                 Client = new TelegramBotClient(token);
 
-                var cts = new System.Threading.CancellationTokenSource();
-                var cancellationToken = cts.Token;
+                ClientCancellationTokenSource = new System.Threading.CancellationTokenSource();
+                var cancellationToken = ClientCancellationTokenSource.Token;
                 var receiverOptions = new global::Telegram.Bot.Polling.ReceiverOptions
                 {
                     AllowedUpdates = { }, // receive all update types
@@ -111,23 +117,21 @@ namespace Zalirun.Telegram.Core
 
         public async Task HandleErrorAsync(ITelegramBotClient bot, Exception exception, CancellationToken cancellationToken)
         {
-            await Task.Factory.StartNew(() =>
-            {
-                Logger.Error(exception, "Telegram update exception");
+            await Task.Yield();
 
-                ExceptionRecieved?.Invoke(this, exception);
-            });
+            Logger.Error(exception, "Telegram update exception");
+
+            ExceptionRecieved?.Invoke(this, exception);
         }
 
         public async Task HandleUpdateAsync(ITelegramBotClient bot, Update update, CancellationToken cancellationToken)
         {
-            await Task.Factory.StartNew(() =>
-            {
-                Logger.Info($"Telegram Update : {update.Type} {update.CallbackQuery?.From} {update.CallbackQuery?.Data}");
-                Logger.Trace($"{Newtonsoft.Json.JsonConvert.SerializeObject(update, Newtonsoft.Json.Formatting.Indented)}");
+            await Task.Yield();
 
-                UpdateRecieved?.Invoke(this, update);
-            });
+            Logger.Info($"Telegram Update : {update.Type} {update.CallbackQuery?.From} {update.CallbackQuery?.Data}");
+            Logger.Trace($"{Newtonsoft.Json.JsonConvert.SerializeObject(update, Newtonsoft.Json.Formatting.Indented)}");
+
+            UpdateRecieved?.Invoke(this, update);
         }
 
         public void ClearAllTimers()
@@ -153,12 +157,22 @@ namespace Zalirun.Telegram.Core
             }
         }
 
-        public virtual Task<System.Timers.Timer> SendTimedMessageAsync(double interval, bool autoReset, string chatId, string messageText, IMessageArgs args,
-                                                                            IReplyMarkup replyMarkup = null, ParseMode? parseMode = null,
-                                                                            IEnumerable<MessageEntity> messageEntities = null, bool? disableWebPagePrievew = null,
-                                                                            bool? disableNotification = null, bool? protectContent = null, int? replyToMessageId = null,
-                                                                            bool? allowSendingWithoutReply = null, CancellationToken cancellationToken = default,
-                                                                            Action<Message> onTimedEvent = null)
+        public virtual Task<System.Timers.Timer> SendTimedMessageAsync(
+            double interval,
+            bool autoReset,
+            string chatId,
+            string messageText,
+            IMessageArgs args,
+            IReplyMarkup replyMarkup = null,
+            ParseMode? parseMode = null,
+            IEnumerable<MessageEntity> messageEntities = null,
+            bool? disableWebPagePrievew = null,
+            bool? disableNotification = null,
+            bool? protectContent = null,
+            int? replyToMessageId = null,
+            bool? allowSendingWithoutReply = null,
+            CancellationToken cancellationToken = default,
+            Action<Message> onTimedEvent = null)
         {
             var timer = TimerManager.SetTimer(interval, autoReset, out var timerId);
             OnTimedMessageCreated(this, new MessageTimerEventArgs(timerId, args));
@@ -173,7 +187,7 @@ namespace Zalirun.Telegram.Core
             timer.Elapsed += async (sender, e) =>
             {
                 var message = await SendMessageAsync(chatId, messageText, args, replyMarkup, parseMode, messageEntities, disableWebPagePrievew, disableNotification,
-                                     protectContent, replyToMessageId, allowSendingWithoutReply, cancellationToken);
+                                                     protectContent, replyToMessageId, allowSendingWithoutReply, cancellationToken);
 
                 if (replyMarkup != null)
                 {
@@ -189,11 +203,18 @@ namespace Zalirun.Telegram.Core
             return Task.FromResult(timer);
         }
 
-        public virtual async Task<Message> SendMessageAsync(string chatId, string messageText, IMessageArgs args,
-                                                            IReplyMarkup replyMarkup = null, ParseMode? parseMode = null,
-                                                            IEnumerable<MessageEntity> messageEntities = null, bool? disableWebPagePrievew = null,
-                                                            bool? disableNotification = null, bool? protectContent = null, int? replyToMessageId = null,
-                                                            bool? allowSendingWithoutReply = null, CancellationToken cancellationToken = default)
+        public virtual async Task<Message> SendMessageAsync(string chatId,
+            string messageText,
+            IMessageArgs args,
+            IReplyMarkup replyMarkup = null,
+            ParseMode? parseMode = null,
+            IEnumerable<MessageEntity> messageEntities = null,
+            bool? disableWebPagePrievew = null,
+            bool? disableNotification = null,
+            bool? protectContent = null,
+            int? replyToMessageId = null,
+            bool? allowSendingWithoutReply = null,
+            CancellationToken cancellationToken = default)
         {
             try
             {
@@ -205,12 +226,14 @@ namespace Zalirun.Telegram.Core
                     LogReplyMarkup(message, replyMarkup);
                 }
                 args.Message = message;
-                OnMessageSent(this, args);
+
                 if (args is T tArgs)
                 {
                     var messageId = tArgs.Message.MessageId.ToString();
                     await AddSentMessageAsync(tArgs);
                 }
+
+                OnMessageSent(this, args);
 
                 Logger.Trace($"Sent message Id: {message.MessageId}\n{{\n{message.Text}\n}}");
                 Logger.Info($"Sent message Id: {message.MessageId}");
@@ -223,22 +246,32 @@ namespace Zalirun.Telegram.Core
             }
         }
 
-        public virtual async Task EditTextMessageAsync(Message message, IMessageArgs args,
-                                                       ParseMode? parseMode = null,
-                                                       bool? disableWebPreview = null,
-                                                       CancellationToken cancellationToken = default)
+        public virtual async Task EditTextMessageAsync(
+            Message message,
+            IMessageArgs args,
+            ParseMode? parseMode = null,
+            bool? disableWebPreview = null,
+            CancellationToken cancellationToken = default)
         {
             try
             {
-                var sentMessage = await Client.EditMessageTextAsync(message.Chat.Id, message.MessageId,
-                                                                    message.Text, parseMode, message.Entities, disableWebPreview,
-                                                                    message.ReplyMarkup, cancellationToken);
+                var sentMessage = await Client.EditMessageTextAsync(
+                    message.Chat.Id,
+                    message.MessageId,
+                    message.Text,
+                    parseMode,
+                    message.Entities,
+                    disableWebPreview,
+                    message.ReplyMarkup,
+                    cancellationToken);
+
                 args.Message = message;
-                OnMessageEdit(this, args);
+
                 if (args is T tArgs)
                 {
                     await EditSentMessageAsync(tArgs);
                 }
+                OnMessageEdit(this, args);
 
                 Logger.Trace($"Edited message Id: {message.MessageId}\n{{\n{message.Text}\n}}");
                 Logger.Info($"Edited message Id: {message.MessageId}");
@@ -254,11 +287,11 @@ namespace Zalirun.Telegram.Core
             try
             {
                 await Client.DeleteMessageAsync(chatId, messageId);
-                OnMessageDelete(this, new MessageDeleteEventArgs(chatId, messageId));
                 if (SentMessages.ContainsKey(messageId.ToString()))
                 {
                     await RemoveSentMessageAsync(messageId);
                 }
+                OnMessageDelete(this, new MessageDeleteEventArgs(chatId, messageId));
 
                 Logger.Info($"Deleted message Id: {messageId} in chat {chatId}");
                 return true;
@@ -268,6 +301,36 @@ namespace Zalirun.Telegram.Core
                 Logger.Error(e);
                 return false;
             }
+        }
+        protected static void SetClientRestartTimer(TelegramBotBase<T> bot)
+        {
+            var token = bot.TelegramBotConfigurator.GetTelegramBotToken(bot.TelegramBotName);
+
+            ClientRestartTimer = TimerManager.SetTimer(bot.TelegramBotConfigurator.ClientRestartInterval, true, out _);
+            ClientRestartTimer.Elapsed += async (sender, e) =>
+            {
+                if (Client == null)
+                {
+                    bot.StartClient(token);
+                }
+                else
+                {
+                    try
+                    {
+                        var user = await Client.GetMeAsync();
+                        if (user == null)
+                        {
+                            ClientCancellationTokenSource.Cancel();
+                            bot.StartClient(token);
+                        }
+                    }
+                    catch (Exception)
+                    {
+                        ClientCancellationTokenSource.Cancel();
+                        bot.StartClient(token);
+                    }
+                }
+            };
         }
 
         protected virtual void OnInit(object sender, EventArgs e)
@@ -307,7 +370,7 @@ namespace Zalirun.Telegram.Core
             if (SentMessages.ContainsKey(messageId.ToString()))
             {
                 SentMessages.Remove(messageId.ToString());
-                await Task.Factory.StartNew(() =>
+                _ = Task.Run(() =>
                 {
                     FileManager.WriteJson(SentMessagesFileName, SentMessages);
                     FileReaderSemaphore.Release();
@@ -320,7 +383,7 @@ namespace Zalirun.Telegram.Core
             await FileReaderSemaphore.WaitAsync();
 
             SentMessages.Add(args?.Message.MessageId.ToString(), args);
-            await Task.Factory.StartNew(() =>
+            _ = Task.Run(() =>
             {
                 FileManager.WriteJson(SentMessagesFileName, SentMessages);
                 FileReaderSemaphore.Release();
@@ -335,7 +398,7 @@ namespace Zalirun.Telegram.Core
             if (SentMessages.ContainsKey(messageId))
             {
                 SentMessages[messageId] = args;
-                await Task.Factory.StartNew(() =>
+                _ = Task.Run(() =>
                 {
                     FileManager.WriteJson(SentMessagesFileName, SentMessages);
                     FileReaderSemaphore.Release();
@@ -408,66 +471,63 @@ namespace Zalirun.Telegram.Core
 
         protected abstract void OnExceptionRecieved(object sender, Exception e);
 
-        private async void OnUpdateRecieved(object sender, Update e)
+        private void OnUpdateRecieved(object sender, Update e)
         {
-            await Task.Factory.StartNew(async () =>
+            try
             {
-                try
+                switch (e.Type)
                 {
-                    switch (e.Type)
-                    {
-                        case global::Telegram.Bot.Types.Enums.UpdateType.Unknown:
-                            await HandleUnkownUpdateAsync(e);
-                            break;
-                        case global::Telegram.Bot.Types.Enums.UpdateType.Message:
-                            await HandleMessageUpdateAsync(e.Message);
-                            break;
-                        case global::Telegram.Bot.Types.Enums.UpdateType.InlineQuery:
-                            await HandleInlineQueryUpdateAsync(e.InlineQuery);
-                            break;
-                        case global::Telegram.Bot.Types.Enums.UpdateType.ChosenInlineResult:
-                            await HandleChosenInlineResultUpdateAsync(e.ChosenInlineResult);
-                            break;
-                        case global::Telegram.Bot.Types.Enums.UpdateType.CallbackQuery:
-                            await HandleCallbackQueryUpdateAsync(e.CallbackQuery);
-                            break;
-                        case global::Telegram.Bot.Types.Enums.UpdateType.EditedMessage:
-                            await HandleEditedMessageUpdateAsync(e.EditedMessage);
-                            break;
-                        case global::Telegram.Bot.Types.Enums.UpdateType.ChannelPost:
-                            await HandleChannelPostUpdateAsync(e.ChannelPost);
-                            break;
-                        case global::Telegram.Bot.Types.Enums.UpdateType.EditedChannelPost:
-                            await HandleEditChannelPostUpdateAsync(e.EditedChannelPost);
-                            break;
-                        case global::Telegram.Bot.Types.Enums.UpdateType.ShippingQuery:
-                            await HandleShippingQueryUpdateAsync(e.ShippingQuery);
-                            break;
-                        case global::Telegram.Bot.Types.Enums.UpdateType.PreCheckoutQuery:
-                            await HandlePreCheckoutQueryUpdateAsync(e.PreCheckoutQuery);
-                            break;
-                        case global::Telegram.Bot.Types.Enums.UpdateType.Poll:
-                            await HandlePollUpdateAsync(e.Poll);
-                            break;
-                        case global::Telegram.Bot.Types.Enums.UpdateType.PollAnswer:
-                            await HandlePollAnswerUpdateAsync(e.PollAnswer);
-                            break;
-                        case global::Telegram.Bot.Types.Enums.UpdateType.MyChatMember:
-                            await HandleMyChatMemberUpdateAsync(e.MyChatMember);
-                            break;
-                        case global::Telegram.Bot.Types.Enums.UpdateType.ChatMember:
-                            await HandleChatMemberUpdateAsync(e.ChatMember);
-                            break;
-                        case global::Telegram.Bot.Types.Enums.UpdateType.ChatJoinRequest:
-                            await HandleChatJoinRequestUpdateAsync(e.ChatJoinRequest);
-                            break;
-                    }
+                    case UpdateType.Unknown:
+                        HandleUnkownUpdateAsync(e);
+                        break;
+                    case UpdateType.Message:
+                        HandleMessageUpdateAsync(e.Message);
+                        break;
+                    case UpdateType.InlineQuery:
+                        HandleInlineQueryUpdateAsync(e.InlineQuery);
+                        break;
+                    case UpdateType.ChosenInlineResult:
+                        HandleChosenInlineResultUpdateAsync(e.ChosenInlineResult);
+                        break;
+                    case UpdateType.CallbackQuery:
+                        HandleCallbackQueryUpdateAsync(e.CallbackQuery);
+                        break;
+                    case UpdateType.EditedMessage:
+                        HandleEditedMessageUpdateAsync(e.EditedMessage);
+                        break;
+                    case UpdateType.ChannelPost:
+                        HandleChannelPostUpdateAsync(e.ChannelPost);
+                        break;
+                    case UpdateType.EditedChannelPost:
+                        HandleEditChannelPostUpdateAsync(e.EditedChannelPost);
+                        break;
+                    case UpdateType.ShippingQuery:
+                        HandleShippingQueryUpdateAsync(e.ShippingQuery);
+                        break;
+                    case UpdateType.PreCheckoutQuery:
+                        HandlePreCheckoutQueryUpdateAsync(e.PreCheckoutQuery);
+                        break;
+                    case UpdateType.Poll:
+                        HandlePollUpdateAsync(e.Poll);
+                        break;
+                    case UpdateType.PollAnswer:
+                        HandlePollAnswerUpdateAsync(e.PollAnswer);
+                        break;
+                    case UpdateType.MyChatMember:
+                        HandleMyChatMemberUpdateAsync(e.MyChatMember);
+                        break;
+                    case UpdateType.ChatMember:
+                        HandleChatMemberUpdateAsync(e.ChatMember);
+                        break;
+                    case UpdateType.ChatJoinRequest:
+                        HandleChatJoinRequestUpdateAsync(e.ChatJoinRequest);
+                        break;
                 }
-                catch (Exception ex)
-                {
-                    Logger.Error(ex);
-                }
-            });
+            }
+            catch (Exception ex)
+            {
+                Logger.Error(ex);
+            }
         }
 
         protected static void LogReplyMarkup(Message message, IReplyMarkup replyMarkup)
