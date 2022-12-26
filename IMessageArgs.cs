@@ -1,7 +1,7 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Text;
-using Telegram.Bot.Types;
+using global::Telegram.Bot.Types;
 
 namespace Zalirun.Telegram.Core
 {
