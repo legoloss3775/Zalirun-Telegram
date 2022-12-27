@@ -7,6 +7,7 @@ namespace Zalirun.Telegram.Core
 {
     public interface IMessageArgs
     {
+        string ChatId { get; set; }
         Message Message { get; set; }
     }
 }
