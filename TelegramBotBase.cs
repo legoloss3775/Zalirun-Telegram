@@ -80,12 +80,13 @@ namespace Zalirun.Telegram.Core
         {
             try
             {
-                Logger.Info($"Begin >> Start {GetType().Name}");
-                if (Client != null)
+                Logger.Info($"Begin >> Start Client {GetType().Name}");
+                if (Client != null && ClientCancellationTokenSource != null && ClientCancellationTokenSource.IsCancellationRequested == false)
                 {
                     Logger.Error(new Exception("Telegram Client already started"));
                     return;
                 }
+
                 Client = new TelegramBotClient(token);
 
                 ClientCancellationTokenSource = new System.Threading.CancellationTokenSource();
@@ -107,7 +108,7 @@ namespace Zalirun.Telegram.Core
 
                 OnClientStart(this);
 
-                Logger.Info($"End >> Start {GetType().Name}");
+                Logger.Info($"End >> Start Client {GetType().Name}");
             }
             catch (Exception e)
             {
@@ -117,11 +118,17 @@ namespace Zalirun.Telegram.Core
 
         public async Task HandleErrorAsync(ITelegramBotClient bot, Exception exception, CancellationToken cancellationToken)
         {
-            await Task.Yield();
+            await Task.Run(() =>
+            {
+                Logger.Error(exception, "Telegram update exception");
 
-            Logger.Error(exception, "Telegram update exception");
+                ClientCancellationTokenSource.Cancel();
+                ClientCancellationTokenSource.Dispose();
 
-            ExceptionRecieved?.Invoke(this, exception);
+                StartClient(TelegramBotConfigurator.GetTelegramBotToken(TelegramBotName));
+
+                ExceptionRecieved?.Invoke(this, exception);
+            });
         }
 
         public async Task HandleUpdateAsync(ITelegramBotClient bot, Update update, CancellationToken cancellationToken)
@@ -175,14 +182,11 @@ namespace Zalirun.Telegram.Core
             Action<Message> onTimedEvent = null)
         {
             var timer = TimerManager.SetTimer(interval, autoReset, out var timerId);
-            OnTimedMessageCreated(this, new MessageTimerEventArgs(timerId, args));
+            args.ChatId = chatId;
             if (args is T tArgs)
             {
                 MessageTimerIds.Add(timerId, tArgs);
             }
-
-            Logger.Trace($"Created message with timer Id : {timerId} for chatId : {chatId}\nMessage :\n{{\n{messageText}\n}}");
-            Logger.Info($"Created message with timer Id : {timerId}, chatId : {chatId}");
 
             timer.Elapsed += async (sender, e) =>
             {
@@ -200,6 +204,11 @@ namespace Zalirun.Telegram.Core
 
                 onTimedEvent?.Invoke(message);
             };
+
+            OnTimedMessageCreated(this, new MessageTimerEventArgs(timerId, args));
+
+            Logger.Trace($"Created message with timer Id : {timerId} for chatId : {chatId}\nMessage :\n{{\n{messageText}\n}}");
+            Logger.Info($"Created message with timer Id : {timerId}, chatId : {chatId}");
             return Task.FromResult(timer);
         }
 
