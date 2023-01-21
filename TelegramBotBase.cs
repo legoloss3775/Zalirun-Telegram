@@ -11,6 +11,8 @@ using Telegram.Bot.Types.Enums;
 using Telegram.Bot.Types.Payments;
 using Telegram.Bot.Types.ReplyMarkups;
 using Zalirun.Extentions;
+using Telegram.Bot.Exceptions;
+using System.Collections.Concurrent;
 
 namespace Zalirun.Telegram.Core
 {
@@ -27,7 +29,7 @@ namespace Zalirun.Telegram.Core
         public abstract string TelegramBotName { get; }
         public virtual string SentMessagesFileName => $"{this.GetType().Name}.json";
         public virtual Dictionary<string, T> SentMessages { get; private set; } = new Dictionary<string, T>();
-        public virtual Dictionary<Guid, T> MessageTimerIds { get; private set; } = new Dictionary<Guid, T>();
+        public virtual ConcurrentDictionary<Guid, T> MessageTimerIds { get; private set; } = new ConcurrentDictionary<Guid, T>();
 
         protected virtual int DeleteOldMessagesDaysInterval => 30;
 
@@ -57,7 +59,7 @@ namespace Zalirun.Telegram.Core
                     throw new Exception("Telegram Configurator not found");
                 }
 
-                LoadSentMessagesFromDataStore();
+                LoadSentMessagesFromDatastore();
                 if (Client == null)
                 {
                     StartClient(TelegramBotConfigurator.GetTelegramBotToken(TelegramBotName));
@@ -69,6 +71,7 @@ namespace Zalirun.Telegram.Core
             catch (Exception e)
             {
                 Logger.Error(e);
+                throw;
             }
             finally
             {
@@ -113,6 +116,7 @@ namespace Zalirun.Telegram.Core
             catch (Exception e)
             {
                 Logger.Error(e);
+                throw;
             }
         }
 
@@ -159,7 +163,7 @@ namespace Zalirun.Telegram.Core
                 }
                 else
                 {
-                    MessageTimerIds.Remove(id);
+                    MessageTimerIds.TryRemove(id, out _);
                 }
             }
         }
@@ -181,11 +185,17 @@ namespace Zalirun.Telegram.Core
             CancellationToken cancellationToken = default,
             Action<Message> onTimedEvent = null)
         {
+            if(args is null)
+            {
+                Logger.Error(new ArgumentException("Message args is null"));
+                return Task.FromResult(TimerManager.SetTimer(interval, autoReset, out _));
+            }
+
             var timer = TimerManager.SetTimer(interval, autoReset, out var timerId);
             args.ChatId = chatId;
             if (args is T tArgs)
             {
-                MessageTimerIds.Add(timerId, tArgs);
+                MessageTimerIds.TryAdd(timerId, tArgs);
             }
 
             timer.Elapsed += async (sender, e) =>
@@ -193,13 +203,9 @@ namespace Zalirun.Telegram.Core
                 var message = await SendMessageAsync(chatId, messageText, args, replyMarkup, parseMode, messageEntities, disableWebPagePrievew, disableNotification,
                                                      protectContent, replyToMessageId, allowSendingWithoutReply, cancellationToken);
 
-                if (replyMarkup != null)
-                {
-                    LogReplyMarkup(message, replyMarkup);
-                }
                 if (!autoReset)
                 {
-                    MessageTimerIds.Remove(timerId);
+                    MessageTimerIds.TryRemove(timerId, out _);
                 }
 
                 onTimedEvent?.Invoke(message);
@@ -212,7 +218,8 @@ namespace Zalirun.Telegram.Core
             return Task.FromResult(timer);
         }
 
-        public virtual async Task<Message> SendMessageAsync(string chatId,
+        public virtual async Task<Message> SendMessageAsync(
+            string chatId,
             string messageText,
             IMessageArgs args,
             IReplyMarkup replyMarkup = null,
@@ -227,31 +234,42 @@ namespace Zalirun.Telegram.Core
         {
             try
             {
+                if (args is null)
+                {
+                    Logger.Error(new ArgumentException("Message args is null"));
+                    return new Message();
+                }
+
                 var message = await Client.SendTextMessageAsync(chatId, messageText, parseMode, messageEntities, disableWebPagePrievew, disableNotification,
                                                                 protectContent, replyToMessageId, allowSendingWithoutReply, replyMarkup, cancellationToken);
 
-                if (replyMarkup != null)
-                {
-                    LogReplyMarkup(message, replyMarkup);
-                }
                 args.Message = message;
 
                 if (args is T tArgs)
                 {
                     var messageId = tArgs.Message.MessageId.ToString();
-                    await AddSentMessageAsync(tArgs);
+                    await AddSentMessageInDatastoreAsync(tArgs);
                 }
 
                 OnMessageSent(this, args);
 
                 Logger.Trace($"Sent message Id: {message.MessageId}\n{{\n{message.Text}\n}}");
-                Logger.Info($"Sent message Id: {message.MessageId}");
+
+                if (replyMarkup != null)
+                {
+                    LogReplyMarkup(message, replyMarkup);
+                }
+                else
+                {
+                    Logger.Info($"Sent message Id: {message.MessageId} ChatId : {message.Chat.Id}");
+                }
+
                 return message;
             }
             catch (Exception e)
             {
                 Logger.Error(e);
-                return default;
+                throw;
             }
         }
 
@@ -264,6 +282,12 @@ namespace Zalirun.Telegram.Core
         {
             try
             {
+                if (args is null)
+                {
+                    Logger.Error(new ArgumentException("Message args is null"));
+                    return;
+                }
+
                 var sentMessage = await Client.EditMessageTextAsync(
                     message.Chat.Id,
                     message.MessageId,
@@ -278,7 +302,7 @@ namespace Zalirun.Telegram.Core
 
                 if (args is T tArgs)
                 {
-                    await EditSentMessageAsync(tArgs);
+                    await EditSentMessageInDatastoreAsync(tArgs);
                 }
                 OnMessageEdit(this, args);
 
@@ -288,6 +312,7 @@ namespace Zalirun.Telegram.Core
             catch (Exception e)
             {
                 Logger.Error(e);
+                throw;
             }
         }
 
@@ -298,7 +323,7 @@ namespace Zalirun.Telegram.Core
                 await Client.DeleteMessageAsync(chatId, messageId);
                 if (SentMessages.ContainsKey(messageId.ToString()))
                 {
-                    await RemoveSentMessageAsync(messageId);
+                    await RemoveSentMessageFromDatastoreAsync(messageId);
                 }
                 OnMessageDelete(this, new MessageDeleteEventArgs(chatId, messageId));
 
@@ -307,8 +332,18 @@ namespace Zalirun.Telegram.Core
             }
             catch (Exception e)
             {
+                if(e is ApiRequestException ex)
+                {
+                    if(ex.Message == "Bad Request: message to delete not found")
+                    {
+                        if (SentMessages.ContainsKey(messageId.ToString()))
+                        {
+                            await RemoveSentMessageFromDatastoreAsync(messageId);
+                        }
+                    }
+                }
                 Logger.Error(e);
-                return false;
+                throw;
             }
         }
         protected static void SetClientRestartTimer(TelegramBotBase<T> bot)
@@ -372,7 +407,7 @@ namespace Zalirun.Telegram.Core
             MessageDelete?.Invoke(sender, e);
         }
 
-        protected virtual async Task RemoveSentMessageAsync(int messageId)
+        protected virtual async Task RemoveSentMessageFromDatastoreAsync(int messageId)
         {
             await FileReaderSemaphore.WaitAsync();
 
@@ -387,7 +422,7 @@ namespace Zalirun.Telegram.Core
             }
         }
 
-        protected virtual async Task AddSentMessageAsync(T args)
+        protected virtual async Task AddSentMessageInDatastoreAsync(T args)
         {
             await FileReaderSemaphore.WaitAsync();
 
@@ -399,7 +434,7 @@ namespace Zalirun.Telegram.Core
             });
         }
 
-        protected virtual async Task EditSentMessageAsync(T args)
+        protected virtual async Task EditSentMessageInDatastoreAsync(T args)
         {
             await FileReaderSemaphore.WaitAsync();
 
@@ -415,7 +450,7 @@ namespace Zalirun.Telegram.Core
             }
         }
 
-        protected virtual void LoadSentMessagesFromDataStore()
+        protected virtual void LoadSentMessagesFromDatastore()
         {
             var dictionary = FileManager.ReadJson<Dictionary<string, T>>(SentMessagesFileName);
             if (dictionary != null)
@@ -430,7 +465,7 @@ namespace Zalirun.Telegram.Core
             Logger.Info($"{SentMessagesFileName} - found {dictionary.Count} values");
         }
 
-        protected virtual void DeleteOldMessagesFromDataStore()
+        protected virtual void DeleteOldMessagesFromDatastore()
         {
             var count = 0;
             foreach (var keyValue in SentMessages.ToDictionary(x => x.Key, y => y.Value))
@@ -480,60 +515,60 @@ namespace Zalirun.Telegram.Core
 
         protected abstract void OnExceptionRecieved(object sender, Exception e);
 
-        private void OnUpdateRecieved(object sender, Update e)
+        private async void OnUpdateRecieved(object sender, Update e)
         {
             try
             {
                 switch (e.Type)
                 {
                     case UpdateType.Unknown:
-                        HandleUnkownUpdateAsync(e);
+                        await HandleUnkownUpdateAsync(e);
                         break;
                     case UpdateType.Message:
-                        HandleMessageUpdateAsync(e.Message);
+                        await HandleMessageUpdateAsync(e.Message);
                         break;
                     case UpdateType.InlineQuery:
-                        HandleInlineQueryUpdateAsync(e.InlineQuery);
+                        await HandleInlineQueryUpdateAsync(e.InlineQuery);
                         break;
                     case UpdateType.ChosenInlineResult:
-                        HandleChosenInlineResultUpdateAsync(e.ChosenInlineResult);
+                        await HandleChosenInlineResultUpdateAsync(e.ChosenInlineResult);
                         break;
                     case UpdateType.CallbackQuery:
-                        HandleCallbackQueryUpdateAsync(e.CallbackQuery);
+                        await HandleCallbackQueryUpdateAsync(e.CallbackQuery);
                         break;
                     case UpdateType.EditedMessage:
-                        HandleEditedMessageUpdateAsync(e.EditedMessage);
+                        await HandleEditedMessageUpdateAsync(e.EditedMessage);
                         break;
                     case UpdateType.ChannelPost:
-                        HandleChannelPostUpdateAsync(e.ChannelPost);
+                        await HandleChannelPostUpdateAsync(e.ChannelPost);
                         break;
                     case UpdateType.EditedChannelPost:
-                        HandleEditChannelPostUpdateAsync(e.EditedChannelPost);
+                        await HandleEditChannelPostUpdateAsync(e.EditedChannelPost);
                         break;
                     case UpdateType.ShippingQuery:
-                        HandleShippingQueryUpdateAsync(e.ShippingQuery);
+                        await HandleShippingQueryUpdateAsync(e.ShippingQuery);
                         break;
                     case UpdateType.PreCheckoutQuery:
-                        HandlePreCheckoutQueryUpdateAsync(e.PreCheckoutQuery);
+                        await HandlePreCheckoutQueryUpdateAsync(e.PreCheckoutQuery);
                         break;
                     case UpdateType.Poll:
-                        HandlePollUpdateAsync(e.Poll);
+                        await HandlePollUpdateAsync(e.Poll);
                         break;
                     case UpdateType.PollAnswer:
-                        HandlePollAnswerUpdateAsync(e.PollAnswer);
+                        await HandlePollAnswerUpdateAsync(e.PollAnswer);
                         break;
                     case UpdateType.MyChatMember:
-                        HandleMyChatMemberUpdateAsync(e.MyChatMember);
+                        await HandleMyChatMemberUpdateAsync(e.MyChatMember);
                         break;
                     case UpdateType.ChatMember:
-                        HandleChatMemberUpdateAsync(e.ChatMember);
+                        await HandleChatMemberUpdateAsync(e.ChatMember);
                         break;
                     case UpdateType.ChatJoinRequest:
-                        HandleChatJoinRequestUpdateAsync(e.ChatJoinRequest);
+                        await HandleChatJoinRequestUpdateAsync(e.ChatJoinRequest);
                         break;
                 }
             }
-            catch (Exception ex)
+            catch(Exception ex)
             {
                 Logger.Error(ex);
             }
@@ -563,8 +598,8 @@ namespace Zalirun.Telegram.Core
                     sb.AppendLine();
                 }
 
+                Logger.Info($"Sent inline keyboard message Id: {message.MessageId}, ChatId : {message.Chat.Id}");
                 Logger.Trace($"Sent inline keyboard message Id: {message.MessageId} \n{message.Text} \n Keyboard : {sb.ToString()}");
-                Logger.Info($"Sent inline keyboard message Id: {message.MessageId}");
             }
         }
     }
